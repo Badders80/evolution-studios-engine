@@ -1,0 +1,92 @@
+version: '3.8'
+
+services:
+  # 1. CPU-BOUND SERVICE: Orchestrator (The Controller)
+  orchestrator:
+    build: ./services/orchestrator
+    container_name: evolution_api_orchestrator
+    restart: unless-stopped
+    # Expose to your internal network for the Evolution 3.0 frontend to call
+    ports:
+      - "8080:8080"
+    environment:
+      - TRANSCRIPTION_URL=${TRANSCRIPTION_URL}
+      - ENRICHMENT_URL=${ENRICHMENT_URL}
+      - REFINER_URL=${REFINER_URL}
+      - SUPABASE_URL=${SUPABASE_URL}
+      - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}
+    volumes:
+      - ./services/orchestrator:/app
+
+  # 2. GPU-BOUND SERVICE: Audio Transcription
+  transcription:
+    build: ./services/transcriber
+    container_name: faster_whisper_processor
+    restart: unless-stopped
+    # Allocate GPU/VRAM
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    
+    # Scratch Disk Volume Mount (WSL2 Placeholder)
+    volumes:
+      volumes:
+      - /home/evo/scratch/input:/app/input
+      - /home/evo/scratch/transcription_cache:/root/.cache/whisper
+    environment:
+      - WHISPER_MODEL=medium.en
+      - COMPUTE_TYPE=int8 
+    ports:
+      - "8000:8000"
+
+  # 3. CPU-BOUND SERVICE: Scraper (miStable Video Download & Audio Extraction)
+  scraper:
+    build: ./services/scraper
+    container_name: mistable_scraper
+    restart: unless-stopped
+    environment:
+      - SUPABASE_URL=${SUPABASE_URL}
+      - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}
+    ports:
+      - "8003:8003"
+    volumes:
+      - /tmp/scraper_temp:/tmp:rw  # Temporary storage for downloads
+
+  # 4. CPU-BOUND SERVICE: Enrichment (Jargon Removal & NER)
+  enrichment:
+    build: ./services/enrich-svc
+    container_name: enrichment_processor
+    restart: unless-stopped
+    ports:
+      - "8002:8002"
+
+  # 5. GPU-BOUND SERVICE: LLM Refinement
+  llm_refiner:
+    build: ./services/refiner
+    container_name: llm_refinement_processor
+    restart: unless-stopped
+    # Allocate GPU/VRAM
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    
+    # Scratch Disk Volume Mount (WSL2 Placeholder)
+    volumes:
+          volumes:
+      volumes:
+      - /home/evo/llm_models:/app/models
+      - /home/evo/scratch/processed_data:/app/processed_data
+    environment:
+      - MODEL_NAME=mistral-7b-finetune.gguf
+      - N_GPU_LAYERS=-1 
+      - N_CTX=4096    
+    ports:
+      - "8001:8001"
